@@ -1,7 +1,6 @@
 {
   "hosting": {
     "source": ".",
-    "site": "unimentor-ai-online",
     "ignore": [
       "firebase.json",
       "**/.*",

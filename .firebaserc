@@ -1,5 +1,9 @@
 {
   "projects": {
-    "default": "ai-builder-sawirapp"
-  }
+    "default": "ai-builder-sawirapp",
+    "n": "kz-beta-cloud",
+    "unimentor": "kz-beta-cloud"
+  },
+  "targets": {},
+  "etags": {}
 }
