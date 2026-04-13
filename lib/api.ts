@@ -22,7 +22,7 @@ import type {
 // API base URL. In development you can set NEXT_PUBLIC_API_URL to an absolute URL
 // (https://...) or leave it empty to use relative requests which can be proxied
 // via Next.js rewrites (recommended to avoid CORS issues during development).
-const BASE = (process.env.NEXT_PUBLIC_API_URL as string) ?? ""
+const BASE = "https://unimentor-api.pp.ua"
 
 // ---- Response normalization helpers ----
 
@@ -477,9 +477,7 @@ export const aiApi = {
       score: Number(c.score || 0),
       title: String(c.title || c.name || ""),
     }))
-    // Some AI backends may return pre-rendered audio or speech in base64 form
-    const audio = String(raw.audio_base64 || raw.audio || raw.speech || "") || null
-    return { answer, citations, audio_base64: audio }
+    return { answer, citations }
   },
 }
 

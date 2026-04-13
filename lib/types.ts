@@ -112,8 +112,6 @@ export interface AiCitation {
 export interface AiAskResponse {
   answer: string
   citations: AiCitation[]
-  /** Optional base64-encoded audio (wav/mp3) returned by the AI service */
-  audio_base64?: string | null
 }
 
 // ---- Composite responses from backend ----

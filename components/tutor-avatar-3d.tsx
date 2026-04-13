@@ -8,7 +8,7 @@ import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js
 import { cn } from "@/lib/utils"
 import { User } from "lucide-react"
 
-const GLB_URL = "/avatar3.glb"
+const GLB_URL = "/avatar2.glb"
 
 export type TutorAvatarSize = "sm" | "md" | "lg" | "xl"
 
@@ -74,7 +74,7 @@ function HeadPortraitCamera({ root }: { root: THREE.Object3D }) {
   return null
 }
 
-function AvatarRig({ speaking, intensity = 1 }: { speaking: boolean; intensity?: number }) {
+function AvatarRig({ speaking }: { speaking: boolean }) {
   const groupRef = useRef<THREE.Group>(null)
   const { scene, animations } = useGLTF(GLB_URL)
   const clone = useMemo(() => cloneSkinned(scene), [scene])
@@ -122,16 +122,13 @@ function AvatarRig({ speaking, intensity = 1 }: { speaking: boolean; intensity?:
     let closeTarget = 0
 
     if (speaking) {
-      // base procedural mouth movement
       const a = 0.5 + 0.5 * Math.sin(t * 10.2)
       const b = 0.5 + 0.5 * Math.sin(t * 7.1 + 0.8)
       const c = 0.5 + 0.5 * Math.sin(t * 15.4 + 2.1)
       const d = 0.5 + 0.5 * Math.sin(t * 4.2)
       const blend = 0.32 * a + 0.28 * b + 0.22 * c + 0.18 * d
-      const intensityClamped = Math.min(1, Math.max(0, intensity))
-      // Scale jaw target with intensity so external audio can drive mouth opening
-      jawTarget = 0.18 + 0.62 * blend * intensityClamped
-      jawTarget = THREE.MathUtils.clamp(jawTarget, 0.0, 0.92)
+      jawTarget = 0.18 + 0.62 * blend
+      jawTarget = THREE.MathUtils.clamp(jawTarget, 0.14, 0.92)
       funnelTarget = 0.1 + 0.28 * jawTarget
       smileTarget = 0.08 + 0.12 * Math.sin(t * 6)
       closeTarget = Math.max(0, 0.22 * (1 - jawTarget))
@@ -167,7 +164,7 @@ function AvatarRig({ speaking, intensity = 1 }: { speaking: boolean; intensity?:
   )
 }
 
-function AvatarCanvas({ speaking, size, intensity }: { speaking: boolean; size: TutorAvatarSize; intensity?: number }) {
+function AvatarCanvas({ speaking, size }: { speaking: boolean; size: TutorAvatarSize }) {
   const { w, h } = canvasSize[size]
   return (
     <Canvas
@@ -186,7 +183,7 @@ function AvatarCanvas({ speaking, size, intensity }: { speaking: boolean; size: 
       <directionalLight position={[4, 8, 5]} intensity={1.05} />
       <directionalLight position={[-5, 3, -3]} intensity={0.38} />
       <Suspense fallback={null}>
-        <AvatarRig speaking={speaking} intensity={intensity} />
+        <AvatarRig speaking={speaking} />
       </Suspense>
     </Canvas>
   )
@@ -250,7 +247,7 @@ export function TutorAvatar3D({
       role="img"
       aria-label={speaking ? "Тьютор говорит" : "Тьютор"}
     >
-      <AvatarCanvas speaking={speaking} size={size} intensity={speaking ? 1 : 0} />
+      <AvatarCanvas speaking={speaking} size={size} />
     </div>
   )
 }

@@ -26,8 +26,8 @@ import { useLocale } from "@/lib/locale-context"
 import { toast } from "sonner"
 import Link from "next/link"
 
-const TutorAvatar3D: any = dynamic(
-  () => import("@/components/tutor-avatar-3d").then((m: any) => m.TutorAvatar3D),
+const TutorAvatar3D = dynamic(
+  () => import("@/components/tutor-avatar-3d").then((m) => m.TutorAvatar3D),
   { ssr: false }
 )
 
@@ -63,15 +63,9 @@ export function AiTutor({ courseId, lessonId, lessonTitle }: AiTutorProps) {
   const [mode, setMode] = useState<AiMode>("explain")
   const [loading, setLoading] = useState(false)
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null)
-  const [avatarIntensity, setAvatarIntensity] = useState<number>(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const speakTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const audioCtxRef = useRef<AudioContext | null>(null)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const sourceRef = useRef<AudioBufferSourceNode | null>(null)
-  const dataArrayRef = useRef<Uint8Array | null>(null)
-  const rafRef = useRef<number | null>(null)
   const { t } = useLocale()
 
   const scheduleSpeakEnd = (msgId: string, durationMs: number) => {
@@ -85,18 +79,6 @@ export function AiTutor({ courseId, lessonId, lessonTitle }: AiTutorProps) {
   useEffect(() => {
     return () => {
       if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current)
-      // cleanup audio resources
-      if (sourceRef.current) {
-        try { sourceRef.current.stop() } catch {}
-        sourceRef.current.disconnect()
-        sourceRef.current = null
-      }
-      if (analyserRef.current) analyserRef.current.disconnect()
-      if (audioCtxRef.current) {
-        try { audioCtxRef.current.close() } catch {}
-        audioCtxRef.current = null
-      }
-      if (rafRef.current) cancelAnimationFrame(rafRef.current)
     }
   }, [])
 
@@ -151,84 +133,7 @@ export function AiTutor({ courseId, lessonId, lessonTitle }: AiTutorProps) {
       }
       setMessages((prev) => [...prev, aiMsg])
       setSpeakingMsgId(aiMsg.id)
-
-      // If backend provided audio (base64), play it and run analyser to drive avatar intensity
-      const audioB64 = (response as any).audio_base64 || (response as any).audio || null
-      if (audioB64) {
-        try {
-          const audioB64Str = String(audioB64)
-          // create/reuse AudioContext
-          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
-          if (!audioCtxRef.current) audioCtxRef.current = new AudioCtx()
-          const audioCtx = audioCtxRef.current
-
-          // Convert base64 into ArrayBuffer via data URI fetch (works for large binaries too)
-          const mime = audioB64Str.startsWith("data:") ? audioB64Str.split(",")[0].split(":" )[1].split(";")[0] : "audio/wav"
-          const dataUri = audioB64Str.startsWith("data:") ? audioB64Str : `data:${mime};base64,${audioB64Str}`
-          const resp = await fetch(dataUri)
-          const arrayBuffer = await resp.arrayBuffer()
-          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
-
-          // create analyser
-          const analyser = audioCtx.createAnalyser()
-          analyser.fftSize = 2048
-          const source = audioCtx.createBufferSource()
-          source.buffer = audioBuffer
-          source.connect(analyser)
-          analyser.connect(audioCtx.destination)
-
-          analyserRef.current = analyser
-          sourceRef.current = source
-          const dataArray = new Uint8Array(analyser.frequencyBinCount)
-          dataArrayRef.current = dataArray
-
-          // resume context if suspended
-          if (audioCtx.state === "suspended") await audioCtx.resume()
-
-          // start playback
-          source.start()
-
-          // sample analyser and set avatar intensity
-          const sample = () => {
-            if (!analyserRef.current || !dataArrayRef.current) return
-              ;(analyserRef.current as any).getByteTimeDomainData(dataArrayRef.current as any)
-            let sum = 0
-            for (let i = 0; i < dataArrayRef.current.length; i++) {
-              const v = (dataArrayRef.current[i] - 128) / 128
-              sum += v * v
-            }
-            const rms = Math.sqrt(sum / dataArrayRef.current.length)
-            // amplify a bit for visual effect
-            const intensity = Math.min(1, rms * 4)
-            setAvatarIntensity(intensity)
-            rafRef.current = requestAnimationFrame(sample)
-          }
-          rafRef.current = requestAnimationFrame(sample)
-
-          // on end cleanup
-          source.onended = () => {
-            if (rafRef.current) cancelAnimationFrame(rafRef.current)
-            rafRef.current = null
-            setAvatarIntensity(0)
-            setSpeakingMsgId((id) => (id === aiMsg.id ? null : id))
-            // stop and disconnect
-            try { source.disconnect() } catch {}
-            try { analyser.disconnect() } catch {}
-            sourceRef.current = null
-            analyserRef.current = null
-          }
-
-          // schedule end in case onended doesn't fire
-          scheduleSpeakEnd(aiMsg.id, Math.round((audioBuffer.duration || 0) * 1000) || speakingDurationMs(response.answer))
-        } catch (err) {
-          // fallback: no audio playback
-          console.warn("Audio playback failed:", err)
-          scheduleSpeakEnd(aiMsg.id, speakingDurationMs(response.answer))
-        }
-      } else {
-        // no audio — fallback to visual speaking simulation
-        scheduleSpeakEnd(aiMsg.id, speakingDurationMs(response.answer))
-      }
+      scheduleSpeakEnd(aiMsg.id, speakingDurationMs(response.answer))
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Ошибка AI")
       const errorMsg: ChatMessage = {
@@ -277,7 +182,6 @@ export function AiTutor({ courseId, lessonId, lessonTitle }: AiTutorProps) {
             <TutorAvatar3D
               size="xl"
               speaking={tutorSpeaking}
-              intensity={avatarIntensity}
               className="shadow-md ring-1 ring-black/[0.06]"
             />
             <div className="w-full text-center lg:text-left">
