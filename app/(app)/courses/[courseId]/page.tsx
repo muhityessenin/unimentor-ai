@@ -1,0 +1,309 @@
+"use client"
+
+import { useEffect, useState } from "react"
+import { useRouter, useParams } from "next/navigation"
+import { useAuth } from "@/lib/auth-context"
+import { useLocale } from '@/lib/locale-context'
+import { coursesApi, assignmentsApi } from "@/lib/api"
+import type { Course, ModuleWithLessons, Lesson, Assignment, ProgressSummary } from "@/lib/types"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
+import { CourseProgressBar, ErrorState, PageSkeleton, StatusBadge } from "@/components/shared"
+import { BookOpen, Circle, Clock, Loader2, FileText, ArrowRight } from "lucide-react"
+import Link from "next/link"
+import { toast } from "sonner"
+
+export default function CourseDetailPage() {
+  const params = useParams()
+  const courseId = Number(params.courseId)
+  const { user } = useAuth()
+  const { t, locale } = useLocale()
+
+  const router = useRouter()
+  const [course, setCourse] = useState<Course | null>(null)
+  const [modulesWithLessons, setModulesWithLessons] = useState<ModuleWithLessons[]>([])
+  const [progressSummary, setProgressSummary] = useState<ProgressSummary | null>(null)
+  const [courseAssignments, setCourseAssignments] = useState<Assignment[]>([])
+  const [enrolled, setEnrolled] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [enrolling, setEnrolling] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notAuthorized, setNotAuthorized] = useState(false)
+
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const detail = await coursesApi.get(courseId)
+      setCourse(detail.course)
+      setModulesWithLessons(detail.modules || [])
+      setProgressSummary(detail.progress_summary || null)
+      setEnrolled(true) // If we reach here successfully with coursesApi.get, we are likely enrolled or have access
+
+      // Gather all lessons and load assignments
+      const allLessons = (detail.modules || []).flatMap((m) => m.lessons)
+      const assignmentPromises = allLessons.map((l) => assignmentsApi.getByLesson(l.id))
+      const allAssignments = (await Promise.all(assignmentPromises)).filter(Boolean) as Assignment[]
+      setCourseAssignments(allAssignments)
+    } catch (e: any) {
+      const status = e?.status
+      const msg = e instanceof Error ? e.message : "Ошибка загрузки"
+      
+      // If 403 or NOT_ENROLLED — user is not enrolled
+      if (status === 403 || msg.includes("NOT_ENROLLED") || msg.includes("403")) {
+        setEnrolled(false)
+        setNotAuthorized(true)
+        // Try fetching basic info without enrollment
+        try {
+          const allCourses = await coursesApi.listPublished()
+          const found = allCourses.find((c) => c.id === courseId)
+          if (found) setCourse(found)
+        } catch {
+          setError(msg)
+        }
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    load()
+    
+    // Force reload when tab becomes visible or focused (e.g., returning from another page)
+    const onVisibilityChange = () => {
+      if (!document.hidden) load()
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange)
+    window.addEventListener("focus", onVisibilityChange)
+    
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+      window.removeEventListener("focus", onVisibilityChange)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseId, user])
+
+  const handleEnroll = async () => {
+    if (!user || enrolling || enrolled) return
+    setEnrolling(true)
+    try {
+      await coursesApi.enroll(courseId)
+  toast.success(t('course.enrollSuccess', 'You have been enrolled in the course!'))
+      
+      // Stay on the main course page to show the "Unlocked" view (modules, continue button, etc.)
+      setEnrolled(true)
+      load()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t('course.enrollError', 'Enrollment failed'))
+    } finally {
+      setEnrolling(false)
+    }
+  }
+
+  if (loading) return <PageSkeleton />
+  if (error) return <div className="p-6"><ErrorState message={error} onRetry={load} /></div>
+  if (notAuthorized)
+    return (
+      <div className="mx-auto max-w-4xl px-4 py-8">
+        <Breadcrumb>
+          <BreadcrumbList>
+            <BreadcrumbItem>
+              <BreadcrumbLink href="/">{t('nav.home', 'Home')}</BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbLink href="/catalog">{t('nav.catalog', 'Catalog')}</BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>{course?.title || t('course.title', 'Course')}</BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+
+        <div className="mt-8 rounded-lg border bg-muted p-6 text-center">
+          <h2 className="text-lg font-semibold">{t('course.accessDenied.title', 'Access restricted')}</h2>
+          <p className="mt-2 text-sm text-muted-foreground">{t('course.accessDenied.message', "You are not enrolled in this course or you don't have access.")}</p>
+          <div className="mt-4 flex items-center justify-center gap-3">
+            {user ? (
+              <Button onClick={handleEnroll} disabled={enrolling} size="lg">
+                {enrolling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {t('course.enrollButton', 'Enroll in course')}
+              </Button>
+            ) : (
+              <Link href="/login" className="text-sm font-medium text-primary hover:underline">{t('course.loginToEnroll', 'Sign in to enroll')}</Link>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  if (!course) return null
+
+  const allLessons = modulesWithLessons.flatMap((m) => m.lessons)
+  const totalLessons = progressSummary?.total_lessons ?? allLessons.length
+  const completedLessons = progressSummary?.completed_lessons ?? 0
+  const coursePercent = progressSummary?.progress_percent ?? 0
+
+  const dateLocale = locale === 'ru' ? 'ru-RU' : 'en-US'
+
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-8">
+      <Breadcrumb>
+        <BreadcrumbList>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/">{t('nav.home', 'Home')}</BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/catalog">{t('nav.catalog', 'Catalog')}</BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbPage>{course.title}</BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+
+      {/* Course Header */}
+      <div className="mt-6 flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold text-foreground text-balance">{course.title}</h1>
+            <StatusBadge status={course.status} />
+          </div>
+          <p className="mt-2 text-muted-foreground">{course.description}</p>
+          <div className="mt-3 flex items-center gap-4 text-sm text-muted-foreground">
+            <span className="flex items-center gap-1"><BookOpen className="h-4 w-4" /> {t('course.lessonsCount', '{count} lessons').replace('{count}', String(totalLessons))}</span>
+            <span className="flex items-center gap-1"><FileText className="h-4 w-4" /> {t('course.assignmentsCount', '{count} assignments').replace('{count}', String(courseAssignments.length))}</span>
+            <Badge variant="outline">{course.language.toUpperCase()}</Badge>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          {!enrolled ? (
+            <Button onClick={handleEnroll} disabled={enrolling} size="lg">
+              {enrolling && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {t('course.enrollButton', 'Enroll in course')}
+            </Button>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <Card className="w-full lg:w-64">
+                <CardContent className="p-4">
+                  <p className="text-sm font-medium text-foreground">{t('course.progress.title', 'Your progress')}</p>
+                  <CourseProgressBar percent={coursePercent} className="mt-2" />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t('course.progress.lessons', '{completed} of {total} lessons completed')
+                      .replace('{completed}', String(completedLessons))
+                      .replace('{total}', String(totalLessons))}
+                  </p>
+                </CardContent>
+              </Card>
+              {allLessons.length > 0 && (
+                <Link href={`/lessons/${allLessons[0].id}`}>
+                    <Button className="w-full" size="lg">
+                    {t('course.continue', 'Continue learning')}
+                    <ArrowRight className="ml-2 h-4 w-4" />
+                  </Button>
+                </Link>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Modules & Lessons */}
+      {modulesWithLessons.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-lg font-semibold text-foreground">{t('course.program.title', 'Course outline')}</h2>
+          <Accordion type="multiple" defaultValue={modulesWithLessons.map((m) => String(m.module.id))} className="mt-4">
+            {modulesWithLessons.map((mwl) => {
+              const modLessons = mwl.lessons
+              return (
+                <AccordionItem key={mwl.module.id} value={String(mwl.module.id)}>
+                  <AccordionTrigger className="text-left">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{mwl.module.title}</span>
+                      <Badge variant="secondary" className="text-xs">{t('course.lessonsCount', '{count} lessons').replace('{count}', String(modLessons.length))}</Badge>
+                    </div>
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <div className="flex flex-col gap-1 pl-1">
+                      {modLessons.map((lesson) => (
+                        <Link
+                          key={lesson.id}
+                          href={enrolled ? `/lessons/${lesson.id}` : "#"}
+                          onClick={(e) => {
+                            if (!enrolled) {
+                              e.preventDefault()
+                              toast.info(t('course.toast.enrollPrompt', 'Please enroll in the course to open the lesson'))
+                            }
+                          }}
+                          className="flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
+                        >
+                          <Circle className="h-4 w-4 text-muted-foreground" />
+                          <span className="flex-1 text-foreground">{lesson.title}</span>
+                          {!lesson.is_published && (
+                            <Badge variant="outline" className="text-xs">{t('course.draft', 'Draft')}</Badge>
+                          )}
+                        </Link>
+                      ))}
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              )
+            })}
+          </Accordion>
+        </div>
+      )}
+
+      {/* Assignments Section */}
+      {courseAssignments.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-lg font-semibold text-foreground">{t('course.assignments.title', 'Assignments')}</h2>
+          <div className="mt-4 flex flex-col gap-2">
+            {courseAssignments.map((a) => {
+              const lesson = allLessons.find((l) => l.id === a.lesson_id)
+              return (
+                <Card key={a.id}>
+                  <CardContent className="flex items-center justify-between p-4">
+                    <div>
+                      <p className="font-medium text-foreground">{a.title}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {lesson ? t('course.assignment.lesson', 'Lesson: {lesson}').replace('{lesson}', lesson.title) : ""}
+                        {lesson ? ' | ' : ''}{t('course.assignment.maxScore', 'Max score: {score}').replace('{score}', String(a.max_score))}
+                      </p>
+                    </div>
+                    {a.due_at && (
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Clock className="h-4 w-4" />
+                        {new Date(a.due_at).toLocaleDateString(dateLocale)}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

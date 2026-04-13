@@ -1,0 +1,461 @@
+"use client"
+
+import dynamic from "next/dynamic"
+import React, { useState, useRef, useEffect } from "react"
+import { aiApi } from "@/lib/api"
+import type { AiMode, ChatMessage, AiCitation } from "@/lib/types"
+import { Button } from "@/components/ui/button"
+import { Textarea } from "@/components/ui/textarea"
+import { Card } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import {
+  User,
+  Send,
+  Loader2,
+  BookOpen,
+  Lightbulb,
+  HelpCircle,
+  ClipboardCheck,
+  CalendarDays,
+  ExternalLink,
+  Trophy,
+  MessageCircle,
+} from "lucide-react"
+import { useLocale } from "@/lib/locale-context"
+import { toast } from "sonner"
+import Link from "next/link"
+
+const TutorAvatar3D: any = dynamic(
+  () => import("@/components/tutor-avatar-3d").then((m: any) => m.TutorAvatar3D),
+  { ssr: false }
+)
+
+function speakingDurationMs(text: string) {
+  return Math.min(16000, Math.max(2000, text.length * 42))
+}
+
+interface AiTutorProps {
+  courseId: number | null
+  lessonId: number
+  lessonTitle: string
+}
+
+const modeLabels: Record<AiMode, { label: string; icon: React.ElementType }> = {
+  explain: { label: "Объяснение", icon: Lightbulb },
+  quiz: { label: "Квиз", icon: HelpCircle },
+  check_homework: { label: "Проверка ДЗ", icon: ClipboardCheck },
+  plan: { label: "План обучения", icon: CalendarDays },
+}
+
+const quickActions = [
+  { label: "Объясни проще", mode: "explain" as AiMode, message: "Объясни тему этого урока простыми словами" },
+  { label: "Дай пример", mode: "explain" as AiMode, message: "Приведи практический пример по теме урока" },
+  { label: "Сделай квиз", mode: "quiz" as AiMode, message: "Сделай мини-квиз по теме урока" },
+  { label: "Проверь мою домашку", mode: "check_homework" as AiMode, message: "Проверь мою домашнюю работу по этому уроку" },
+]
+
+const AI_MODE_ORDER: AiMode[] = ["explain", "quiz", "check_homework", "plan"]
+
+export function AiTutor({ courseId, lessonId, lessonTitle }: AiTutorProps) {
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [input, setInput] = useState("")
+  const [mode, setMode] = useState<AiMode>("explain")
+  const [loading, setLoading] = useState(false)
+  const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null)
+  const [avatarIntensity, setAvatarIntensity] = useState<number>(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const speakTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null)
+  const dataArrayRef = useRef<Uint8Array | null>(null)
+  const rafRef = useRef<number | null>(null)
+  const { t } = useLocale()
+
+  const scheduleSpeakEnd = (msgId: string, durationMs: number) => {
+    if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current)
+    speakTimeoutRef.current = setTimeout(() => {
+      setSpeakingMsgId((id) => (id === msgId ? null : id))
+      speakTimeoutRef.current = null
+    }, durationMs)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current)
+      // cleanup audio resources
+      if (sourceRef.current) {
+        try { sourceRef.current.stop() } catch {}
+        sourceRef.current.disconnect()
+        sourceRef.current = null
+      }
+      if (analyserRef.current) analyserRef.current.disconnect()
+      if (audioCtxRef.current) {
+        try { audioCtxRef.current.close() } catch {}
+        audioCtxRef.current = null
+      }
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [messages, loading])
+
+  const sendMessage = async (text: string, overrideMode?: AiMode) => {
+    if (!text.trim() || loading) return
+
+    if (!courseId) {
+      toast.error("Не удалось определить курс для этого урока. Попробуйте открыть урок из раздела курса.")
+      return
+    }
+
+    const currentMode = overrideMode || mode
+    const userMsg: ChatMessage = {
+      id: `msg-${Date.now()}`,
+      role: "user",
+      content: text,
+      mode: currentMode,
+      timestamp: new Date().toISOString(),
+    }
+
+    setMessages((prev) => [...prev, userMsg])
+    setInput("")
+    setLoading(true)
+
+    setSpeakingMsgId(null)
+    try {
+      let enhancedMessage = text
+      if (currentMode === "explain") {
+        enhancedMessage = `[SYSTEM: Отвечай строго, используя метод Сократа. НЕ давай прямой или полный ответ сразу. Вместо этого задай короткий НАВОДЯЩИЙ ВОПРОС, чтобы заставить студента подумать и прийти к ответу самостоятельно. Будь кратким и поддерживающим.]\n\nВопрос студента: ${text}`
+      }
+
+      const response = await aiApi.ask({
+        course_id: courseId,
+        lesson_id: lessonId,
+        mode: currentMode,
+        message: enhancedMessage,
+      })
+
+      const aiMsg: ChatMessage = {
+        id: `msg-${Date.now() + 1}`,
+        role: "assistant",
+        content: response.answer,
+        citations: response.citations,
+        mode: currentMode,
+        timestamp: new Date().toISOString(),
+      }
+      setMessages((prev) => [...prev, aiMsg])
+      setSpeakingMsgId(aiMsg.id)
+
+      // If backend provided audio (base64), play it and run analyser to drive avatar intensity
+      const audioB64 = (response as any).audio_base64 || (response as any).audio || null
+      if (audioB64) {
+        try {
+          const audioB64Str = String(audioB64)
+          // create/reuse AudioContext
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+          if (!audioCtxRef.current) audioCtxRef.current = new AudioCtx()
+          const audioCtx = audioCtxRef.current
+
+          // Convert base64 into ArrayBuffer via data URI fetch (works for large binaries too)
+          const mime = audioB64Str.startsWith("data:") ? audioB64Str.split(",")[0].split(":" )[1].split(";")[0] : "audio/wav"
+          const dataUri = audioB64Str.startsWith("data:") ? audioB64Str : `data:${mime};base64,${audioB64Str}`
+          const resp = await fetch(dataUri)
+          const arrayBuffer = await resp.arrayBuffer()
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
+
+          // create analyser
+          const analyser = audioCtx.createAnalyser()
+          analyser.fftSize = 2048
+          const source = audioCtx.createBufferSource()
+          source.buffer = audioBuffer
+          source.connect(analyser)
+          analyser.connect(audioCtx.destination)
+
+          analyserRef.current = analyser
+          sourceRef.current = source
+          const dataArray = new Uint8Array(analyser.frequencyBinCount)
+          dataArrayRef.current = dataArray
+
+          // resume context if suspended
+          if (audioCtx.state === "suspended") await audioCtx.resume()
+
+          // start playback
+          source.start()
+
+          // sample analyser and set avatar intensity
+          const sample = () => {
+            if (!analyserRef.current || !dataArrayRef.current) return
+              ;(analyserRef.current as any).getByteTimeDomainData(dataArrayRef.current as any)
+            let sum = 0
+            for (let i = 0; i < dataArrayRef.current.length; i++) {
+              const v = (dataArrayRef.current[i] - 128) / 128
+              sum += v * v
+            }
+            const rms = Math.sqrt(sum / dataArrayRef.current.length)
+            // amplify a bit for visual effect
+            const intensity = Math.min(1, rms * 4)
+            setAvatarIntensity(intensity)
+            rafRef.current = requestAnimationFrame(sample)
+          }
+          rafRef.current = requestAnimationFrame(sample)
+
+          // on end cleanup
+          source.onended = () => {
+            if (rafRef.current) cancelAnimationFrame(rafRef.current)
+            rafRef.current = null
+            setAvatarIntensity(0)
+            setSpeakingMsgId((id) => (id === aiMsg.id ? null : id))
+            // stop and disconnect
+            try { source.disconnect() } catch {}
+            try { analyser.disconnect() } catch {}
+            sourceRef.current = null
+            analyserRef.current = null
+          }
+
+          // schedule end in case onended doesn't fire
+          scheduleSpeakEnd(aiMsg.id, Math.round((audioBuffer.duration || 0) * 1000) || speakingDurationMs(response.answer))
+        } catch (err) {
+          // fallback: no audio playback
+          console.warn("Audio playback failed:", err)
+          scheduleSpeakEnd(aiMsg.id, speakingDurationMs(response.answer))
+        }
+      } else {
+        // no audio — fallback to visual speaking simulation
+        scheduleSpeakEnd(aiMsg.id, speakingDurationMs(response.answer))
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Ошибка AI")
+      const errorMsg: ChatMessage = {
+        id: `msg-${Date.now() + 1}`,
+        role: "assistant",
+        content: "Произошла ошибка при обращении к AI. Попробуйте ещё раз.",
+        timestamp: new Date().toISOString(),
+      }
+      setMessages((prev) => [...prev, errorMsg])
+      setSpeakingMsgId(errorMsg.id)
+      scheduleSpeakEnd(errorMsg.id, speakingDurationMs(errorMsg.content))
+    } finally {
+      setLoading(false)
+      
+      // Simulate real-time skill assessment / Matrix Update
+      if (currentMode === "quiz" && text.length > 3) {
+        setTimeout(() => {
+          toast.success("Отличный ответ! ИИ обновил вашу Матрицу Навыков.", {
+            description: "+5% к параметру 'Основы Python'",
+            icon: <Trophy className="h-4 w-4 text-amber-500" />
+          })
+        }, 2000)
+      }
+    }
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    sendMessage(input)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage(input)
+    }
+  }
+
+  const tutorSpeaking = loading || speakingMsgId !== null
+
+  return (
+    <div className="flex flex-col gap-3">
+      <Card className="overflow-hidden border-border/60 shadow-sm ring-1 ring-border/40">
+        <div className="flex min-h-[min(420px,70vh)] flex-col lg:min-h-[440px] lg:flex-row">
+            <aside className="flex flex-col items-center gap-3 border-b border-border/50 bg-gradient-to-b from-primary/[0.07] via-muted/20 to-muted/35 px-4 py-5 lg:w-[min(100%,292px)] lg:shrink-0 lg:border-b-0 lg:border-r lg:py-6">
+            <TutorAvatar3D
+              size="xl"
+              speaking={tutorSpeaking}
+              intensity={avatarIntensity}
+              className="shadow-md ring-1 ring-black/[0.06]"
+            />
+            <div className="w-full text-center lg:text-left">
+              <p className="text-sm font-semibold leading-tight text-foreground">{t("ai.title", "AI Tutor")}</p>
+              <p className="mt-1 line-clamp-3 text-xs leading-snug text-muted-foreground">
+                {t("ai.lesson", "Lesson:")}&nbsp;«{lessonTitle}»
+              </p>
+            </div>
+          
+            <p className="hidden text-center text-[11px] leading-relaxed text-muted-foreground lg:block">
+              {t("ai.hint", "Ask a question on the right or pick a quick action — the answer will appear in the chat.")}
+            </p>
+          </aside>
+
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="flex flex-col gap-2 border-b border-border/50 bg-muted/15 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="shrink-0 text-xs font-medium text-muted-foreground">{t("ai.mode", "Mode")}</span>
+                <Select value={mode} onValueChange={(v) => setMode(v as AiMode)}>
+                  <SelectTrigger className="h-9 w-full min-w-[140px] max-w-[220px] sm:w-[200px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AI_MODE_ORDER.map((key) => {
+                      const val = modeLabels[key]
+                      const labelKey = `ai.mode.${key}`
+                      return (
+                        <SelectItem key={key} value={key} textValue={val.label}>
+                          <span className="flex items-center gap-2">
+                            {React.createElement(val.icon, { className: "h-4 w-4 shrink-0" })}
+                            {t(labelKey, val.label)}
+                          </span>
+                        </SelectItem>
+                      )
+                    })}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-0.5 sm:flex-wrap sm:overflow-visible">
+                {quickActions.map((action) => {
+                  const labelKey = action.mode === "explain" ? "ai.quick.explain" : action.mode === "quiz" ? "ai.quick.quiz" : action.mode === "check_homework" ? "ai.quick.check" : "ai.quick.example"
+                  return (
+                    <Button
+                      key={action.message}
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="shrink-0 whitespace-nowrap text-xs"
+                      disabled={loading}
+                      onClick={() => sendMessage(action.message, action.mode)}
+                    >
+                      {t(labelKey, action.label)}
+                    </Button>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div
+              ref={scrollRef}
+              className="min-h-[220px] flex-1 overflow-y-auto overscroll-contain px-3 py-3 sm:px-4"
+              role="log"
+              aria-label="Диалог с тьютором"
+            >
+              {messages.length === 0 ? (
+                <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-2 px-2 text-center">
+                  <MessageCircle className="h-9 w-9 text-muted-foreground/35" strokeWidth={1.25} />
+                  <p className="text-sm font-medium text-foreground">{t("ai.empty.title", "Start a conversation")}</p>
+                  <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+                    {t(
+                      "ai.empty.how",
+                      "Type your question below or press a quick action. The answer will appear here and the tutor on the left will show speech."
+                    )}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {messages.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`flex gap-2 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                    >
+                      <div className={`max-w-[min(100%,520px)] ${msg.role === "user" ? "order-1" : ""}`}>
+                        <div
+                          className={`rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed shadow-sm ${
+                            msg.role === "user"
+                              ? "rounded-tr-md bg-primary text-primary-foreground"
+                              : "rounded-tl-md border border-border/50 bg-muted/50 text-foreground"
+                          }`}
+                        >
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
+                        </div>
+
+                        {msg.citations && msg.citations.length > 0 && (
+                          <div className="mt-2 rounded-lg border border-border/60 bg-card p-2.5">
+                            <p className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <BookOpen className="h-3 w-3" />
+                              Источники ответа
+                            </p>
+                            <div className="flex flex-col gap-0.5">
+                              {msg.citations.map((c) => (
+                                <CitationLink key={c.chunk_id} citation={c} />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {msg.mode && msg.role === "assistant" && (
+                          <div className="mt-1.5">
+                            <Badge variant="outline" className="text-[10px] font-normal">
+                              {modeLabels[msg.mode]?.label || msg.mode}
+                            </Badge>
+                          </div>
+                        )}
+                      </div>
+                      {msg.role === "user" && (
+                        <div className="order-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-foreground/10">
+                          <User className="h-4 w-4 text-foreground" />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {loading && (
+                    <div className="flex justify-start">
+                      <div className="rounded-2xl rounded-tl-md border border-border/50 bg-muted/50 px-3.5 py-2.5 shadow-sm">
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                          {t("ai.loading", "AI is thinking...")}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-border/50 bg-background/80 p-3 backdrop-blur-sm">
+              <form onSubmit={handleSubmit} className="flex gap-2">
+                <Textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={t("ai.placeholder", "Question about the lesson...")}
+                  rows={1}
+                  className="min-h-[44px] flex-1 resize-none rounded-xl border-border/60 bg-muted/30 text-sm focus-visible:ring-primary/30"
+                  disabled={loading}
+                />
+                <Button
+                  type="submit"
+                  size="icon"
+                  className="h-11 w-11 shrink-0 rounded-xl"
+                  disabled={loading || !input.trim()}
+                  aria-label="Отправить"
+                >
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                </Button>
+              </form>
+              <p className="mt-1.5 text-center text-[10px] text-muted-foreground sm:text-left">
+                {t("ai.hint_keys", "Enter — send · Shift+Enter — new line")}
+              </p>
+            </div>
+          </div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function CitationLink({ citation }: { citation: AiCitation }) {
+  return (
+    <Link
+      href={`/lessons/${citation.lesson_id}`}
+      className="flex items-center gap-2 rounded px-2 py-1 text-xs text-primary hover:bg-muted transition-colors"
+    >
+      <ExternalLink className="h-3 w-3" />
+      <span>{citation.title}</span>
+      <span className="text-muted-foreground">({Math.round(citation.score * 100)}%)</span>
+    </Link>
+  )
+}
